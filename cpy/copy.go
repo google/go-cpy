@@ -9,6 +9,10 @@
 // By design, it does not handle unexported fields. If such fields need copying,
 // it is the responsibility of the user to provide a custom copy function
 // to specify how a specific type should be copied.
+//
+// WARNING: This package's API is currently unstable and may change without
+// warning. If this matters to you, you should wait until version
+// 1.0 is released before using it.
 package cpy
 
 import (
