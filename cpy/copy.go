@@ -21,9 +21,8 @@ import (
 	"sync"
 )
 
-// Machine is a copy machine that is preconfigured to copy Go objects
-// according to the preset options provided to New.
-type Machine struct {
+// A Copier copies Go objects.
+type Copier struct {
 	// concFuncs is a list of copy functions that operate on concrete types.
 	concFuncs []reflect.Value // []func(T) T
 
@@ -43,7 +42,7 @@ type Machine struct {
 	ignoreAllUnexported bool
 }
 
-// New initializes a new copy machine according to the provided options.
+// New initializes a new Copier according to the provided options.
 //
 // Example usage:
 //
@@ -56,23 +55,23 @@ type Machine struct {
 //	// Elsewhere in application code.
 //	dst := copier.Copy(src)
 //
-// It is recommended that the copy machine returned by New
+// It is recommended that the Copier returned by New
 // be stored in a global variable so that it can be reused.
-func New(opts ...Option) *Machine {
+func New(opts ...Option) *Copier {
 	// Process options in reverse order since latter arguments take precedence.
 	// Separate out functions that operate on concrete and interface types.
-	var m Machine
+	var c Copier
 	for i := len(opts) - 1; i >= 0; i-- {
 		opt := opts[i]
 		for _, fnc := range opt.copyFuncs {
 			if fnc.Type().In(0).Kind() != reflect.Interface {
-				m.concFuncs = append(m.concFuncs, fnc)
+				c.concFuncs = append(c.concFuncs, fnc)
 			} else {
-				m.ifaceFuncs = append(m.ifaceFuncs, fnc)
+				c.ifaceFuncs = append(c.ifaceFuncs, fnc)
 			}
 		}
 		if opt.ignoreAllUnexported {
-			m.ignoreAllUnexported = true
+			c.ignoreAllUnexported = true
 		}
 	}
 
@@ -141,14 +140,14 @@ func New(opts ...Option) *Machine {
 	// backwards compatible with deepcopy, which it seeks to replace.
 	//
 	// See the discussion on cl/333563483 for more details.
-	if !m.ignoreAllUnexported {
+	if !c.ignoreAllUnexported {
 		panic("cpy.IgnoreAllUnexported must be specified; this requirement may change in the future")
 	}
 
-	return &m
+	return &c
 }
 
-// Copy copies v according to the copy machine presets.
+// Copy copies v according to the Copier presets.
 //
 // Values are copied according to the following rules:
 //
@@ -193,13 +192,13 @@ func New(opts ...Option) *Machine {
 // The output type is guaranteed to be the same as the input type.
 // Copy will panic if that invariant is violated by a provided Func.
 // Copy presently does not handle cycles in the value and will overflow.
-func (m *Machine) Copy(v interface{}) interface{} {
+func (c *Copier) Copy(v interface{}) interface{} {
 	if v == nil {
 		return nil
 	}
-	return m.copy(reflect.ValueOf(v)).Interface()
+	return c.copy(reflect.ValueOf(v)).Interface()
 }
-func (m *Machine) copy(src reflect.Value) (dst reflect.Value) {
+func (c *Copier) copy(src reflect.Value) (dst reflect.Value) {
 	t := src.Type()
 
 	// Return zero values as is.
@@ -208,7 +207,7 @@ func (m *Machine) copy(src reflect.Value) (dst reflect.Value) {
 	}
 
 	// Check if there is a specialized copy function for this type.
-	if fnc := m.lookupFunc(t); fnc.IsValid() {
+	if fnc := c.lookupFunc(t); fnc.IsValid() {
 		ft := fnc.Type().In(0)
 		if ft.Kind() != reflect.Interface {
 			if t == ft {
@@ -231,28 +230,28 @@ func (m *Machine) copy(src reflect.Value) (dst reflect.Value) {
 	switch t.Kind() {
 	case reflect.Ptr:
 		dst = reflect.New(src.Elem().Type())
-		dst.Elem().Set(m.copy(src.Elem()))
+		dst.Elem().Set(c.copy(src.Elem()))
 	case reflect.Interface:
-		dst = m.copy(src.Elem()).Convert(t)
+		dst = c.copy(src.Elem()).Convert(t)
 	case reflect.Array:
 		dst = reflect.New(t).Elem()
 		for i := 0; i < src.Len(); i++ {
-			dst.Index(i).Set(m.copy(src.Index(i)))
+			dst.Index(i).Set(c.copy(src.Index(i)))
 		}
 	case reflect.Slice:
 		dst = reflect.MakeSlice(t, src.Len(), src.Cap())
 		for i := 0; i < src.Len(); i++ {
-			dst.Index(i).Set(m.copy(src.Index(i)))
+			dst.Index(i).Set(c.copy(src.Index(i)))
 		}
 	case reflect.Map:
 		dst = reflect.MakeMap(t)
 		for iter := src.MapRange(); iter.Next(); {
-			dst.SetMapIndex(m.copy(iter.Key()), m.copy(iter.Value()))
+			dst.SetMapIndex(c.copy(iter.Key()), c.copy(iter.Value()))
 		}
 	case reflect.Struct:
 		dst = reflect.New(t).Elem()
-		for _, i := range m.exportedFields(src.Type()) {
-			dst.Field(i).Set(m.copy(src.Field(i)))
+		for _, i := range c.exportedFields(src.Type()) {
+			dst.Field(i).Set(c.copy(src.Field(i)))
 		}
 	}
 	return dst
@@ -260,18 +259,18 @@ func (m *Machine) copy(src reflect.Value) (dst reflect.Value) {
 
 // lookupFunc returns a custom copy function for the provided type
 // if there is one. Otherwise, it returns an invalid value.
-func (m *Machine) lookupFunc(t reflect.Type) reflect.Value {
-	v, ok := m.lookupFuncCache.Load(t)
+func (c *Copier) lookupFunc(t reflect.Type) reflect.Value {
+	v, ok := c.lookupFuncCache.Load(t)
 	if !ok {
-		fnc := m.lookupFuncSlow(t)
-		v, _ = m.lookupFuncCache.LoadOrStore(t, fnc)
+		fnc := c.lookupFuncSlow(t)
+		v, _ = c.lookupFuncCache.LoadOrStore(t, fnc)
 	}
 	return v.(reflect.Value)
 }
-func (m *Machine) lookupFuncSlow(t reflect.Type) reflect.Value {
+func (c *Copier) lookupFuncSlow(t reflect.Type) reflect.Value {
 	// Check for exact match with functions operating on concrete types.
 	for _, t := range []reflect.Type{t, reflect.PtrTo(t)} {
-		for _, fnc := range m.concFuncs {
+		for _, fnc := range c.concFuncs {
 			if t == fnc.Type().In(0) {
 				return fnc
 			}
@@ -279,7 +278,7 @@ func (m *Machine) lookupFuncSlow(t reflect.Type) reflect.Value {
 	}
 	// Check for assignability to functions operating on interface types.
 	for _, t := range []reflect.Type{t, reflect.PtrTo(t)} {
-		for _, fnc := range m.ifaceFuncs {
+		for _, fnc := range c.ifaceFuncs {
 			if strictImplements(t, fnc.Type().In(0)) {
 				return fnc
 			}
@@ -318,21 +317,21 @@ func makeAddr(v reflect.Value) reflect.Value {
 // exportedFields returns a list of exported field indexes in struct t.
 // This method caches the result since reflect.Type.Field is slow
 // since every call always allocates reflect.Type.StructField.Index.
-func (m *Machine) exportedFields(t reflect.Type) []int {
-	v, ok := m.exportedFieldsCache.Load(t)
+func (c *Copier) exportedFields(t reflect.Type) []int {
+	v, ok := c.exportedFieldsCache.Load(t)
 	if !ok {
-		index := m.exportedFieldsSlow(t)
-		v, _ = m.exportedFieldsCache.LoadOrStore(t, index)
+		index := c.exportedFieldsSlow(t)
+		v, _ = c.exportedFieldsCache.LoadOrStore(t, index)
 	}
 	return v.([]int)
 }
-func (m *Machine) exportedFieldsSlow(t reflect.Type) []int {
+func (c *Copier) exportedFieldsSlow(t reflect.Type) []int {
 	index := make([]int, 0, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if f.PkgPath == "" {
 			index = append(index, i) // record index of exported field
-		} else if !m.ignoreAllUnexported {
+		} else if !c.ignoreAllUnexported {
 			var name string
 			if t.Name() != "" {
 				// Named type with unexported fields.
@@ -347,7 +346,7 @@ func (m *Machine) exportedFieldsSlow(t reflect.Type) []int {
 	return index
 }
 
-// Option is an option to configure the creation of new copy machines.
+// Option is an option that configures a Copier.
 // An option must be obtained using a constructor (e.g., Func or Shallow).
 type Option option
 
@@ -365,7 +364,7 @@ type option struct {
 // otherwise it will panic. If T is an interface type,
 // it must have at least one method, otherwise Func will panic.
 // Futhermore, the function must return a concrete type
-// identical to the input type, otherwise Machine.Copy will panic.
+// identical to the input type, otherwise Copier.Copy will panic.
 //
 // The Func will be used if the current type of the value being copied
 // exactly matches the input type (for concrete types) or if it
@@ -407,7 +406,7 @@ func Func(fn interface{}) Option {
 //	cpy.Shallow(time.Time{})
 //
 // Since the fields of time.Time are unexported, the default behavior
-// of Machine.Copy will functionally avoid copying the time value.
+// of Copier.Copy will functionally avoid copying the time value.
 // This option specifies that time.Time is a value that is safe to shallow copy.
 func Shallow(typs ...interface{}) Option {
 	var opt Option
